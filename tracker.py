@@ -119,7 +119,7 @@ class PuckTracker:
 
         x_img = int(self.past_op_mallet_pos[0] * 500)  # scale factor for x
         y_img = int((self.table_width - self.past_op_mallet_pos[1]) * 500)  # invert y-axis for display
-        cv2.circle(top_down_image, (x_img, y_img), int(self.op_mallet_r * 500), (0, 255, 0), -1)
+        cv2.circle(top_down_image, (x_img, y_img), int(self.op_mallet_r * 500), (255, 255, 0), -1)
 
         m_pos = np.array([1.9885 - self.mallet_pos[0], 0.9905 - self.mallet_pos[1]])
 
