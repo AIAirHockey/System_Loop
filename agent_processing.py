@@ -25,16 +25,18 @@ height = 1.9885
 width = 0.9905
 goal_width = 0.254
 
+mallet_r = 0.0508
+puck_r = 0.5 * 0.0618
+
 Vmax = 24
 table_bounds = np.array([height, width])
 margin = 0.065
+margin_bottom = 0.1
 
-mallet_r = 0.0508
-puck_r = 0.5 * 0.0618
 attack = False
 
-margin_bounds = 0.02
-mallet_bounds = np.array([[margin_bounds + mallet_r, height/2 - margin_bounds - mallet_r], [margin_bounds+mallet_r, width-margin_bounds-mallet_r]])
+margin_bounds = 0.0
+mallet_bounds = np.array([[margin_bounds + mallet_r, height/2  + mallet_r/2], [margin_bounds+mallet_r, width-margin_bounds-mallet_r]])
 
 drag = 0.0014273
 friction = 0.00123794
@@ -44,6 +46,10 @@ mass = 0.00776196
 
 past_mallet_pos = [[0,0], [0,0]]
 dts = [0,0]
+
+current_time = time.time()
+xf_past = [0.2, 0.5]
+puck_vel_past = [0,0]
 
 class ScaledNormalParamExtractor(NormalParamExtractor):
     def __init__(self, scale_factor=0.5):
@@ -81,13 +87,13 @@ policy_module = ProbabilisticActor(
     distribution_class=TanhNormal,
     distribution_kwargs={
         "low": torch.tensor([mallet_r, mallet_r, 0.3, 0.3]),
-        "high": torch.tensor([1-mallet_r, 1/2 - mallet_r, 10, 10]),
+        "high": torch.tensor([1-mallet_r, 1 - mallet_r, 10, 10]),
     },
     #default_interaction_type=tensordict.nn.InteractionType.RANDOM,
     return_log_prob=False,
 )
 
-policy_module.load_state_dict(torch.load("policy_weights8.pth"))
+policy_module.load_state_dict(torch.load("policy_weights8.pth")) #8
 
 pullyR = 0.035306
 
@@ -173,9 +179,12 @@ def corner_collision(A, pos, vel, t, final_pos, C, D, tPZero, v_norm, dPZero, di
     c = pos[0]**2+pos[1]**2+A[0]**2+A[1]**2-puck_r**2-2*A[0]*pos[0]-2*A[1]*pos[1]
 
     if b**2 - 4*a*c < 0:
-        print("s < 0 error")
-        print(1/0)
-    s = (-b - np.sqrt(b**2 - 4*a*c)) / (2*a)
+        #print("s < 0 error")
+        #s = max(-b/(2*a), 0.001)
+        #print(1/0)
+        return None, None
+    else:
+        s = (-b - np.sqrt(b**2 - 4*a*c)) / (2*a)
 
     new_pos = [0,0]
     new_pos[0] = pos[0] + s * vel[0]
@@ -369,7 +378,8 @@ def predict_puck(t, pos, vel):
         wall_val = s
         val, info, ier, msg = fsolve(pos_wall, x0=wall_val/v_norm, xtol=1e-4, full_output=True, args=(wall_val,C,D))
         thit = val[0]
-        if ier != 1 and abs(pos_wall(val)) > 1e-4:
+        if ier != 1 and abs(pos_wall(val, wall_val, C, D)) > 1e-4:
+            return None, None
             print("Failed to converge V>=0")
             print(pos)
             print(v_norm)
@@ -719,45 +729,97 @@ def get_mallet():
 
 def take_action(puck_pos, puck_vel, op_mallet_pos, op_mallet_vel, mallet_pos, mallet_vel, mallet_acc, idle):
 
-    global attack
+    try:
+        global attack
+        global current_time
+        global xf_past
+        global puck_vel_past
 
-    puck_pos_noM, puck_vel_noM = predict_puck(0.2, puck_pos, puck_vel)
+        #REVERT
+        puck_pos, puck_vel = predict_puck(0.1, puck_pos, puck_vel)
+        puck_pos = np.array(puck_pos)
+        puck_vel = np.array(puck_vel)
 
-    if puck_pos[0] < 1:
-        attack = False
-    elif puck_pos[0] > 1 and (np.linalg.norm(puck_vel) > 0.7) and (np.abs(puck_vel[1])/np.maximum(np.abs(puck_vel[0]), 0.001) > 7) and (np.abs(puck_pos[:,0] - 1.35) < 0.3):
-        attack = True
-    
-    rescale = np.array([2/height, 1/width])
-    table_bounds_sim = np.array([2,1])
-    #Transition to mallet coordinate system
-    obs = np.hstack((mallet_pos * rescale,\
-                        table_bounds_sim - op_mallet_pos * rescale,\
-                        table_bounds_sim-puck_pos*rescale,\
-                        mallet_vel*rescale,\
-                        -op_mallet_vel*rescale,\
-                        -puck_vel*rescale,\
-                        table_bounds_sim - puck_pos_noM*rescale,
-                        -puck_vel_noM*rescale,
-                        np.array([attack], dtype=np.dtype(bool))))
-    obs = TensorDict({"observation": torch.tensor(obs, dtype=torch.float32)})
+        if puck_pos is None or puck_vel is None:
+            return
 
-    inv_rescale = np.array([height/2, width/1])
-                     
-    #Now proceed in mallet coordinate system
-    policy_out = policy_module(obs)
-    action = policy_out["action"].detach().numpy()
-    xf = action[:2] * inv_rescale
-    xf[0] = np.maximum(margin+mallet_r, xf[0])
-    xf[0] = np.minimum(table_bounds[0]/2-margin-mallet_r, xf[0])
+        puck_pos_noM, puck_vel_noM = predict_puck(0.2, puck_pos, puck_vel)
+        if puck_pos_noM is None or puck_vel_noM is None:
+            return
+        puck_pos_noM = np.array(puck_pos_noM)
+        puck_vel_noM = np.array(puck_vel_noM)
 
-    xf[1] = np.maximum(margin+mallet_r, xf[1])
-    xf[1] = np.minimum(table_bounds[1]-margin-mallet_r, xf[1])
+        #print(puck_vel_noM)
 
-    Vo = action[2:]
+        if puck_pos[0] < 0.95:
+            attack = False
+        elif not attack and (np.linalg.norm(puck_vel) < 1) and (np.abs(puck_pos[0] - 1.35) < 0.4): #0.7) and (np.abs(puck_vel[1])/np.maximum(np.abs(puck_vel[0]), 0.001) > 7) and (np.abs(puck_pos[0] - 1.35) < 0.4):
+        #elif not attack and (np.linalg.norm(puck_vel) > 0.3) and (np.abs(puck_vel[1])/np.maximum(np.abs(puck_vel[0]), 0.001) > 2) and (np.abs(puck_pos[0] - 1.35) < 0.4):
+            attack = True
+            print("ATTACK")
 
-    data = update_path(mallet_pos, mallet_vel, mallet_acc, xf, Vo, idle)
-    ser.write(b'\n' + data + b'\n')
+        
+        rescale = np.array([2/height, 1/width])
+        table_bounds_sim = np.array([2,1])
+        #Transition to mallet coordinate system
+        obs = np.hstack((mallet_pos * rescale,\
+                            table_bounds_sim - op_mallet_pos * rescale,\
+                            table_bounds_sim-puck_pos*rescale,\
+                            mallet_vel*rescale,\
+                            -op_mallet_vel*rescale,\
+                            -puck_vel*rescale,\
+                            table_bounds_sim - puck_pos_noM*rescale,
+                            -puck_vel_noM*rescale,
+                            np.array([attack], dtype=np.dtype(bool))))
+        
+        #print(obs)
+        time.sleep(0.005)
+
+        obs = TensorDict({"observation": torch.tensor(obs, dtype=torch.float32)})
+
+        inv_rescale = np.array([height/2, width/1])
+                        
+        #Now proceed in mallet coordinate system
+        policy_out = policy_module(obs)
+        action = policy_out["action"].detach().numpy()
+        xf = action[:2] * inv_rescale
+        xf[0] = np.maximum(margin_bottom+mallet_r, xf[0])
+        xf[0] = np.minimum(table_bounds[0]/2-mallet_r, xf[0])
+
+        xf[1] = np.maximum(margin+mallet_r, xf[1])
+        xf[1] = np.minimum(table_bounds[1]-margin-mallet_r, xf[1])
+
+        Vo = action[2:]
+        #REVERT
+        if Vo[0] > 5:
+            Vo[0] *= 12/10
+        if Vo[1] > 5:
+            Vo[1] *= 12/10
+
+        if attack:
+            Vo[0] *= 16/10
+            Vo[1] *= 16/10
+
+        #Vo[0] *= 2
+        #Vo[1] *= 2
+
+        if (np.linalg.norm(np.array(xf) - np.array(mallet_pos)) > 0.01):
+            if (attack and time.time() - current_time > 0.25) or (not attack and time.time() - current_time > 0.05):
+            #if (time.time() - current_time > 0.1):
+                data = update_path(mallet_pos, mallet_vel, mallet_acc, xf, Vo, idle)
+                ser.write(b'\n' + data + b'\n')
+                current_time = time.time()
+            #elif np.linalg.norm(puck_vel) - np.linalg.norm(np.array(puck_vel_past)) > 1:
+            #    print(np.linalg.norm(puck_vel))
+            #    print(np.linalg.norm(np.array(puck_vel_past)))
+            #    data = update_path(mallet_pos, mallet_vel, mallet_acc, xf, Vo, idle)
+            #    ser.write(b'\n' + data + b'\n')
+            #    current_time = time.time()
+            #    print("REACT")
+        
+        #puck_vel_past = puck_vel
+    except:
+        return
 
 def convert_to_standard_types(obj):
     """Recursively converts NumPy data types to standard Python types."""
@@ -784,7 +846,7 @@ def mallet_calibration():
     input()
     print("Place extrusions [enter]")
     input()
-    print("Place mallet along X axis [enter]")
+    print("Place mallet bottom right [enter]")
     input()
     ser.write("x\n".encode())
 
@@ -794,7 +856,7 @@ def mallet_calibration():
             latest_msg = ser.readline().decode().strip()
     print(latest_msg) #confirmation of X
 
-    print("Place mallet along Y axis [enter]")
+    print("Place mallet bottom left [enter]")
     input()
     ser.write("y\n".encode())
 
@@ -842,6 +904,10 @@ def choose_mode():
 
 def nn_mode():
     mode_str = "5\n"
+    time.sleep(1)
+
+    if ser.in_waiting:
+        ser.read(ser.in_waiting).decode('utf-8')
 
     ser.write(mode_str.encode())
 
