@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
+import torch
 import PySpin
 import cv2
 import numpy as np
 import sys
 import os
+import agent_processing as ap
 import tracker
 import time
-import agent_processing as ap
+
 import threading
 import queue
 
@@ -155,6 +157,9 @@ def acquire_images(cam, print_values, visual):
             data = ap.update_path(pos, vel, acc, [0.3,0.47], [5,5])
             ap.ser.write(b'\n' + data + b'\n')
 
+            puck_vel = np.array([0,0])
+
+            #current_time = time.time()
             while True:
                 # Retrieve next image with a timeout of 1000ms
                 image_result = cam.GetNextImage()
@@ -165,12 +170,18 @@ def acquire_images(cam, print_values, visual):
                     pos, vel, acc, got_mallet = track.get_mallet()
                 got_mallet = False
 
-                puck_pos, puck_vel, op_mallet_pos, op_mallet_vel = track.process_frame(image_data)
+                puck_pos, puck_vel_new, op_mallet_pos, op_mallet_vel = track.process_frame(image_data)
+                if np.linalg.norm(puck_vel - np.array(puck_vel_new)) < 0.5:
+                    puck_vel = np.array(puck_vel_new) * 0.1 + 0.9 * puck_vel
+                else:
+                    puck_vel = np.array(puck_vel_new)
 
                 if not input_queue.empty():
                     input_queue.get()
                     idleing = True
 
+                #if time.time() - current_time > 0.07:
+                #    current_time = time.time()
                 ap.take_action(puck_pos, puck_vel, op_mallet_pos, op_mallet_vel,pos,vel,acc,idleing)
 
                 if idleing:
@@ -271,7 +282,7 @@ def main():
     Get_calibration_data = False
     Tune_On_Saved_Data = False
 
-    Normal_Mallet = True
+    Normal_Mallet = False
     Print_Values = False
     Visual_Display = False
 
@@ -329,6 +340,3 @@ if __name__ == "__main__":
     track = tracker.PuckTracker()
     input_queue = queue.Queue()
     main()
-
-#(58.45+64.7)/2 = 61.575
-#(29.45+35.7)/2 = 32.575
